@@ -21,7 +21,7 @@ OCCURRENCES=0           # 1 = count every occurrence (default counts matching li
 SHOW_ZERO=0             # 1 = include documents with 0 hits in document-level tables
 FOLDERS=""              # comma list of folder names (prefix optional); empty = all
 OUTFILE=""              # empty = stdout
-SAVEFILE=""             # empty = do not save search results for script 02
+SAVEFILE=""             # empty = do not save search records for script 03 overlap analysis
 PATTERN=""
 MODE=""
 
@@ -34,8 +34,8 @@ US=$'\x1f'              # internal field delimiter (never appears in text)
 #   Same, but 2 lines of context around each hit, only in two folders:
 #     ./02_WASPS_Search.sh -s "cyber(security)? supply chain" -C 2 -f DoDI,DoDD
 #
-#   Literal text (no regex), CSV out to a file:
-#     ./02_WASPS_Search.sh -s "DoDI 8500.01" -F --format csv -o hits.csv
+#   Literal text (no regex), CSV out to a file, and save records for Script 03:
+#     ./02_WASPS_Search.sh -s "DoDI 8500.01" -F --format csv -o hits.csv --save term1.tsv
 #
 #   One row per document (with a sample hit):
 #     ./02_WASPS_Search.sh -s "risk management framework" --view document
@@ -69,7 +69,7 @@ show_help() {
     echo "      --sort KEY         'name' (Default, alphanumeric) or 'hits'"
     echo "      --reverse          Flip sort direction (name: Z-A, hits: low-high)"
     echo "      --zero             Include documents with 0 hits in document-level tables"
-    echo "  -o, --out FILE         Write output report to FILE instead of stdout"
+    echo "  -o, --out FILE         Write report to FILE instead of stdout"
     echo "      --save FILE        Save raw document hit records to FILE (for Script 03 overlap analysis)"
     echo ""
     echo "Scope Options (Optional):"
@@ -134,80 +134,6 @@ collect_files() {
 }
 
 # ==============================================================================
-# PRODUCERS (write rows delimited by $US)
-# ==============================================================================
-
-search_statements() {
-    local f d folder b doc
-    for f in "${FILES[@]}"; do
-        d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
-        b="${f##*/}"; doc="${b%.txt}"
-
-        if [[ $CONTEXT -gt 0 ]]; then
-            "${GREP[@]}" -n -C "$CONTEXT" -e "$PATTERN" "$f"
-        else
-            "${GREP[@]}" -n -e "$PATTERN" "$f"
-        fi | awk -v US="$US" -v folder="$folder" -v doc="$doc" -v ctx="$CONTEXT" -v fmt="$FORMAT" '
-            function flush() { if (buf != "") print folder US doc US buf; buf = "" }
-            $0 == "--" { flush(); next }
-            {
-                if (!match($0, /^[0-9]+[:-]/)) next
-                sep = substr($0, RLENGTH, 1)
-                txt = substr($0, RLENGTH + 1)
-                gsub("\f", "", txt); gsub(/[ \t\r]+/, " ", txt)
-                sub(/^ /, "", txt); sub(/ $/, "", txt)
-                hit = (sep == ":")
-                if (ctx == 0) { if (hit && txt != "") print folder US doc US txt; next }
-                if (txt == "") next
-                if (hit) txt = (fmt == "md") ? "**" txt "**" : ">> " txt
-                buf = (buf == "") ? txt : buf " ⏎ " txt
-            }
-            END { flush() }'
-    done
-}
-
-doc_records() {
-    local f d folder b doc hits first
-    for f in "${FILES[@]}"; do
-        d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
-        b="${f##*/}"; doc="${b%.txt}"
-
-        if [[ $OCCURRENCES -eq 1 ]]; then
-            hits=$(( $("${GREP[@]}" -o -e "$PATTERN" "$f" | wc -l) ))
-        else
-            hits=$(( $("${GREP[@]}" -c -e "$PATTERN" "$f") ))
-        fi
-
-        first=""
-        if [[ "$MODE" == "search" && $hits -gt 0 ]]; then
-            first=$("${GREP[@]}" -m 1 -e "$PATTERN" "$f" | tr -d '\f' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
-        fi
-        printf '%s%s%s%s%s%s%s\n' "$folder" "$US" "$doc" "$US" "$hits" "$US" "$first"
-    done
-}
-
-filter_zero() { awk -F "$US" -v z="$SHOW_ZERO" 'z == 1 || $3 > 0'; }
-
-rollup() {
-    awk -F "$US" -v US="$US" '
-        { s[$1]++; if ($3 > 0) m[$1]++; h[$1] += $3 }
-        END { for (f in s) print f US s[f] US (m[f] + 0) US h[f] }'
-}
-
-sort_records() {
-    local hc="$1" lv="$2" ord="" hord="nr" keys=()
-    if [[ $REVERSE -eq 1 ]]; then ord="r"; hord="n"; fi
-    if [[ "$SORT" == "hits" ]]; then
-        keys+=("-k${hc},${hc}${hord}" "-k1,1V")
-        if [[ $lv -eq 2 ]]; then keys+=("-k2,2V"); fi
-    else
-        keys+=("-k1,1V${ord}")
-        if [[ $lv -eq 2 ]]; then keys+=("-k2,2V${ord}"); fi
-    fi
-    LC_ALL=C sort -t "$US" "${keys[@]}"
-}
-
-# ==============================================================================
 # RENDERER
 # ==============================================================================
 
@@ -251,51 +177,6 @@ print_intro() {
     local cs="case-insensitive"; [[ $CASE_SENSITIVE -eq 1 ]] && cs="case-sensitive"
     echo "**Pattern:** \`$PATTERN\` ($kind, $cs) | **Folders:** ${FOLDERS:-all ${PDF_PREFIX}*}"
     echo ""
-}
-
-# ==============================================================================
-# MODES
-# ==============================================================================
-
-run_search() {
-    local label unit rows docs
-
-    if [[ "$VIEW" == "statement" ]]; then
-        search_statements > "$TMP"
-        label="Statement"; unit="statement(s)"
-        if [[ $CONTEXT -gt 0 ]]; then label="Context"; unit="context block(s)"; fi
-
-        print_intro
-        render_table "Folder,Document,$label" "" < "$TMP"
-        read -r rows docs <<< "$(awk -F "$US" 'NF { r++; d[$1 FS $2] = 1 } END { m = 0; for (k in d) m++; print r + 0, m + 0 }' "$TMP")"
-        if [[ "$rows" -eq 0 ]]; then print_footer "No matches."; else print_footer "**Total:** $rows $unit in $docs of ${#FILES[@]} document(s) ($FOLDER_COUNT folder(s))"; fi
-    else
-        doc_records | filter_zero | sort_records 3 2 > "$TMP"
-        print_intro
-        render_table "Folder,Document,Hits,First_Match" "3" < "$TMP"
-        report_doc_totals
-    fi
-}
-
-run_count() {
-    print_intro
-    if [[ "$BY" == "document" ]]; then
-        doc_records | filter_zero | sort_records 3 2 > "$TMP"
-        render_table "Folder,Document,Hits" "3" < "$TMP"
-        report_doc_totals
-    else
-        doc_records | rollup | sort_records 4 1 > "$TMP"
-        render_table "Folder,Docs_Searched,Docs_Matched,Hits" "2,3,4" < "$TMP"
-        local hits matched
-        read -r hits matched <<< "$(awk -F "$US" '{ h += $4; m += $3 } END { print h + 0, m + 0 }' "$TMP")"
-        print_footer "**Total:** $hits ${HIT_UNIT} in $matched of ${#FILES[@]} document(s) ($FOLDER_COUNT folder(s))"
-    fi
-}
-
-report_doc_totals() {
-    local hits matched
-    read -r hits matched <<< "$(awk -F "$US" '{ h += $3; if ($3 > 0) m++ } END { print h + 0, m + 0 }' "$TMP")"
-    if [[ "$hits" -eq 0 ]]; then print_footer "No matches."; else print_footer "**Total:** $hits ${HIT_UNIT} in $matched of ${#FILES[@]} document(s) ($FOLDER_COUNT folder(s))"; fi
 }
 
 # ==============================================================================
@@ -348,25 +229,151 @@ check_pattern
 build_grep
 collect_files
 
-TMP=$(mktemp)
-trap 'rm -f "$TMP"' EXIT
+if [[ -n "$OUTFILE" ]]; then exec > "$OUTFILE"; fi
 
-# Generate full report to temporary buffer or direct output
-case "$MODE" in
-    search) run_search ;;
-    count)  run_count ;;
-esac > "$TMP"
+print_intro
 
-# If --save is requested, export the clean document hit matrix records (Folder US Doc US Hits US First_Match)
+# Initialize save file if requested
 if [[ -n "$SAVEFILE" ]]; then
-    doc_records | filter_zero > "$SAVEFILE"
-    echo "Saved search hit records to $SAVEFILE" >&2
+    : > "$SAVEFILE"
 fi
 
-# Output handling
-if [[ -n "$OUTFILE" ]]; then
-    cat "$TMP" > "$OUTFILE"
-    echo "Wrote $OUTFILE" >&2
-else
-    cat "$TMP"
+total_statements_count=0
+matched_docs_count=0
+
+# ==============================================================================
+# STREAMING EXECUTION ENGINE (Zero Disk Buffering)
+# ==============================================================================
+
+if [[ "$MODE" == "search" ]]; then
+    if [[ "$VIEW" == "statement" ]]; then
+        # Stream statements directly to render_table without intermediate temp files
+        {
+            for f in "${FILES[@]}"; do
+                d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
+                b="${f##*/}"; doc="${b%.txt}"
+
+                if [[ $OCCURRENCES -eq 1 ]]; then
+                    hits=$(( $("${GREP[@]}" -o -e "$PATTERN" "$f" | wc -l) ))
+                else
+                    hits=$(( $("${GREP[@]}" -c -e "$PATTERN" "$f") ))
+                fi
+
+                if [[ $hits -gt 0 ]]; then
+                    matched_docs_count=$((matched_docs_count + 1))
+                    
+                    if [[ -n "$SAVEFILE" ]]; then
+                        first=$("${GREP[@]}" -m 1 -e "$PATTERN" "$f" | tr -d '\f' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+                        printf '%s%s%s%s%d%s%s\n' "$folder" "$US" "$doc" "$US" "$hits" "$US" "$first" >> "$SAVEFILE"
+                    fi
+
+                    if [[ $CONTEXT -gt 0 ]]; then
+                        "${GREP[@]}" -n -C "$CONTEXT" -e "$PATTERN" "$f"
+                    else
+                        "${GREP[@]}" -n -e "$PATTERN" "$f"
+                    fi | awk -v US="$US" -v folder="$folder" -v doc="$doc" -v ctx="$CONTEXT" -v fmt="$FORMAT" '
+                        function flush() { if (buf != "") { print folder US doc US buf; st_count++ }; buf = "" }
+                        $0 == "--" { flush(); next }
+                        {
+                            if (!match($0, /^[0-9]+[:-]/)) next
+                            sep = substr($0, RLENGTH, 1)
+                            txt = substr($0, RLENGTH + 1)
+                            gsub("\f", "", txt); gsub(/[ \t\r]+/, " ", txt)
+                            sub(/^ /, "", txt); sub(/ $/, "", txt)
+                            hit = (sep == ":")
+                            if (ctx == 0) { if (hit && txt != "") { print folder US doc US txt; st_count++ }; next }
+                            if (txt == "") next
+                            if (hit) txt = (fmt == "md") ? "**" txt "**" : ">> " txt
+                            buf = (buf == "") ? txt : buf " ⏎ " txt
+                        }
+                        END { flush() }'
+                fi
+            done
+        } | render_type="statement" render_table "Folder,Document,Statement" ""
+        
+        if [[ -n "$SAVEFILE" && -f "$SAVEFILE" ]]; then
+            total_statements=$(awk -F "$US" '{s+=$3} END {print s+0}' "$SAVEFILE")
+            total_docs=$(wc -l < "$SAVEFILE")
+            print_footer "**Total:** $total_statements statement(s) in $total_docs of ${#FILES[@]} document(s) ($FOLDER_COUNT folder(s))"
+        else
+            print_footer "Search complete."
+        fi
+    else
+        # Document view: stream records directly
+        {
+            for f in "${FILES[@]}"; do
+                d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
+                b="${f##*/}"; doc="${b%.txt}"
+
+                if [[ $OCCURRENCES -eq 1 ]]; then
+                    hits=$(( $("${GREP[@]}" -o -e "$PATTERN" "$f" | wc -l) ))
+                else
+                    hits=$(( $("${GREP[@]}" -c -e "$PATTERN" "$f") ))
+                fi
+
+                if [[ $SHOW_ZERO -eq 1 || $hits -gt 0 ]]; then
+                    first=""
+                    if [[ $hits -gt 0 ]]; then
+                        first=$("${GREP[@]}" -m 1 -e "$PATTERN" "$f" | tr -d '\f' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+                    fi
+                    printf '%s%s%s%s%d%s%s\n' "$folder" "$US" "$doc" "$US" "$hits" "$US" "$first"
+                    if [[ -n "$SAVEFILE" && $hits -gt 0 ]]; then
+                        printf '%s%s%s%s%d%s%s\n' "$folder" "$US" "$doc" "$US" "$hits" "$US" "$first" >> "$SAVEFILE"
+                    fi
+                fi
+            done
+        } | {
+            # Sort stream safely without large temp disk footprint using sort key 3 numeric
+            local ord="" hord="nr"
+            if [[ $REVERSE -eq 1 ]]; then ord="r"; hord="n"; fi
+            if [[ "$SORT" == "hits" ]]; then
+                LC_ALL=C sort -t "$US" -k3,3${hord} -k1,1V -k2,2V
+            else
+                LC_ALL=C sort -t "$US" -k1,1V${ord} -k2,2V${ord}
+            fi
+        } | render_table "Folder,Document,Hits,First_Match" "3"
+        
+        if [[ -n "$SAVEFILE" && -f "$SAVEFILE" ]]; then
+            total_hits=$(awk -F "$US" '{h+=$3; if($3>0)m++} END {print h+0, m+0}' "$SAVEFILE")
+            read -r h m <<< "$total_hits"
+            print_footer "**Total:** $h matching line(s) in $m of ${#FILES[@]} document(s) ($FOLDER_COUNT folder(s))"
+        fi
+    fi
+elif [[ "$MODE" == "count" ]]; then
+    # Count mode streaming
+    {
+        for f in "${FILES[@]}"; do
+            d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
+            b="${f##*/}"; doc="${b%.txt}"
+
+            if [[ $OCCURRENCES -eq 1 ]]; then
+                hits=$(( $("${GREP[@]}" -o -e "$PATTERN" "$f" | wc -l) ))
+            else
+                hits=$(( $("${GREP[@]}" -c -e "$PATTERN" "$f") ))
+            fi
+
+            first=""
+            if [[ $hits -gt 0 ]]; then
+                first=$("${GREP[@]}" -m 1 -e "$PATTERN" "$f" | tr -d '\f' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+            fi
+            printf '%s%s%s%s%d%s%s\n' "$folder" "$US" "$doc" "$US" "$hits" "$US" "$first"
+            if [[ -n "$SAVEFILE" && $hits -gt 0 ]]; then
+                printf '%s%s%s%s%d%s%s\n' "$folder" "$US" "$doc" "$US" "$hits" "$US" "$first" >> "$SAVEFILE"
+            fi
+        done
+    } | {
+        if [[ "$BY" == "document" ]]; then
+            awk -F "$US" -v z="$SHOW_ZERO" 'z == 1 || $3 > 0' | sort -t "$US" -k3,3nr -k1,1V -k2,2V
+        else
+            awk -F "$US" -v US="$US" '
+                { s[$1]++; if ($3 > 0) m[$1]++; h[$1] += $3 }
+                END { for (f in s) print f US s[f] US (m[f] + 0) US h[f] }' | sort -t "$US" -k4,4nr -k1,1V
+        fi
+    } | if [[ "$BY" == "document" ]]; then
+        render_table "Folder,Document,Hits" "3"
+    else
+        render_table "Folder,Docs_Searched,Docs_Matched,Hits" "2,3,4"
+    fi
 fi
+
+if [[ -n "$OUTFILE" ]]; then echo "Wrote $OUTFILE" >&2; fi
