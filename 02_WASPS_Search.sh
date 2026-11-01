@@ -21,6 +21,7 @@ OCCURRENCES=0           # 1 = count every occurrence (default counts matching li
 SHOW_ZERO=0             # 1 = include documents with 0 hits in document-level tables
 FOLDERS=""              # comma list of folder names (prefix optional); empty = all
 OUTFILE=""              # empty = stdout
+SAVEFILE=""             # empty = do not save search results for script 02
 PATTERN=""
 MODE=""
 
@@ -28,28 +29,28 @@ US=$'\x1f'              # internal field delimiter (never appears in text)
 
 # Usage Examples:
 #   Find every line mentioning a phrase (regex, case-insensitive):
-#     ./03_WASPS_Search.sh -s "zero trust"
+#     ./02_WASPS_Search.sh -s "zero trust"
 #
 #   Same, but 2 lines of context around each hit, only in two folders:
-#     ./03_WASPS_Search.sh -s "cyber(security)? supply chain" -C 2 -f DoDI,DoDD
+#     ./02_WASPS_Search.sh -s "cyber(security)? supply chain" -C 2 -f DoDI,DoDD
 #
 #   Literal text (no regex), CSV out to a file:
-#     ./03_WASPS_Search.sh -s "DoDI 8500.01" -F --format csv -o hits.csv
+#     ./02_WASPS_Search.sh -s "DoDI 8500.01" -F --format csv -o hits.csv
 #
 #   One row per document (with a sample hit):
-#     ./03_WASPS_Search.sh -s "risk management framework" --view document
+#     ./02_WASPS_Search.sh -s "risk management framework" --view document
 #
 #   Summary: hits per document, most hits first:
-#     ./03_WASPS_Search.sh -c "risk management framework" --sort hits
+#     ./02_WASPS_Search.sh -c "risk management framework" --sort hits
 #
 #   Summary rolled up per folder:
-#     ./03_WASPS_Search.sh -c "risk management framework" --by folder
+#     ./02_WASPS_Search.sh -c "risk management framework" --by folder
 #
 #   Different prefix / location:
-#     ./03_WASPS_Search.sh -s "foo" -p Docs_ -r ~/work
+#     ./02_WASPS_Search.sh -s "foo" -p Docs_ -r ~/work
 
 show_help() {
-    echo "Usage: ./03_WASPS_Search.sh [MODE] [OPTIONS]"
+    echo "Usage: ./02_WASPS_Search.sh [MODE] [OPTIONS]"
     echo ""
     echo "Modes (Required):"
     echo "  -s, --search PATTERN   Find matching lines (or documents, see --view)"
@@ -68,18 +69,13 @@ show_help() {
     echo "      --sort KEY         'name' (Default, alphanumeric) or 'hits'"
     echo "      --reverse          Flip sort direction (name: Z-A, hits: low-high)"
     echo "      --zero             Include documents with 0 hits in document-level tables"
-    echo "  -o, --out FILE         Write to FILE instead of stdout"
+    echo "  -o, --out FILE         Write output report to FILE instead of stdout"
+    echo "      --save FILE        Save raw document hit records to FILE (for Script 03 overlap analysis)"
     echo ""
     echo "Scope Options (Optional):"
     echo "  -f, --folders LIST     Comma list of folders, with or without prefix (Default: all)"
     echo "  -r, --root DIR         Where the folders live (Default: $ROOT_DIR)"
     echo "  -p, --prefix STR       Folder prefix to search (Default: $PDF_PREFIX)"
-    echo ""
-    echo "Notes:"
-    echo "  * A 'hit' is a matching LINE (use --occurrences for every occurrence)."
-    echo "  * CSV is quoted; totals go to stderr so stdout stays clean for processing."
-    echo "  * In context mode each row is one block of lines; hits are marked"
-    echo "    (**bold** in md, '>> ' in csv)."
     exit 1
 }
 
@@ -120,7 +116,6 @@ collect_files() {
         folder_wanted "$folder" || continue
         FOLDER_COUNT=$((FOLDER_COUNT + 1))
 
-        # Sanity check: every PDF should have a non-empty TXT twin
         missing=0; empty=0
         for p in "$dir"*.pdf; do
             txt="${p%.*}.txt"
@@ -142,7 +137,6 @@ collect_files() {
 # PRODUCERS (write rows delimited by $US)
 # ==============================================================================
 
-# Capability 1a: one row per hit (or per context block)
 search_statements() {
     local f d folder b doc
     for f in "${FILES[@]}"; do
@@ -158,7 +152,7 @@ search_statements() {
             $0 == "--" { flush(); next }
             {
                 if (!match($0, /^[0-9]+[:-]/)) next
-                sep = substr($0, RLENGTH, 1)          # ":" = hit, "-" = context line
+                sep = substr($0, RLENGTH, 1)
                 txt = substr($0, RLENGTH + 1)
                 gsub("\f", "", txt); gsub(/[ \t\r]+/, " ", txt)
                 sub(/^ /, "", txt); sub(/ $/, "", txt)
@@ -172,7 +166,6 @@ search_statements() {
     done
 }
 
-# Capability 1b / 2: folder, document, hits, first matching line (all documents)
 doc_records() {
     local f d folder b doc hits first
     for f in "${FILES[@]}"; do
@@ -195,14 +188,12 @@ doc_records() {
 
 filter_zero() { awk -F "$US" -v z="$SHOW_ZERO" 'z == 1 || $3 > 0'; }
 
-# folder, docs_searched, docs_matched, hits
 rollup() {
     awk -F "$US" -v US="$US" '
         { s[$1]++; if ($3 > 0) m[$1]++; h[$1] += $3 }
         END { for (f in s) print f US s[f] US (m[f] + 0) US h[f] }'
 }
 
-# sort_records HITCOL LEVEL   (LEVEL 2 = folder+document keys, 1 = folder only)
 sort_records() {
     local hc="$1" lv="$2" ord="" hord="nr" keys=()
     if [[ $REVERSE -eq 1 ]]; then ord="r"; hord="n"; fi
@@ -217,7 +208,7 @@ sort_records() {
 }
 
 # ==============================================================================
-# RENDERER (md or csv)   render_table "Col1,Col2,..." "right-aligned/numeric cols"
+# RENDERER
 # ==============================================================================
 
 render_table() {
@@ -250,7 +241,7 @@ render_table() {
         }'
 }
 
-print_footer() {    # md: part of the report; csv: stderr, so stdout stays pure data
+print_footer() {
     if [[ "$FORMAT" == "md" ]]; then echo ""; echo "$1"; else echo "${1//\*\*/}" >&2; fi
 }
 
@@ -326,6 +317,7 @@ while [[ "$#" -gt 0 ]]; do
         --reverse) REVERSE=1; shift ;;
         --zero) SHOW_ZERO=1; shift ;;
         -o|--out) OUTFILE="${2:?missing value for $1}"; shift 2 ;;
+        --save) SAVEFILE="${2:?missing value for $1}"; shift 2 ;;
         -f|--folders) FOLDERS="${2:?missing value for $1}"; shift 2 ;;
         -r|--root) ROOT_DIR="${2:?missing value for $1}"; shift 2 ;;
         -p|--prefix) PDF_PREFIX="${2:?missing value for $1}"; shift 2 ;;
@@ -336,14 +328,12 @@ done
 
 [[ -n "$MODE" ]] || { echo "Error: You must specify a mode (-s or -c)."; show_help; }
 
-# Validate choices
 [[ "$FORMAT" == "md" || "$FORMAT" == "csv" ]]         || die "--format must be 'md' or 'csv'."
 [[ "$VIEW" == "statement" || "$VIEW" == "document" ]] || die "--view must be 'statement' or 'document'."
 [[ "$BY" == "document" || "$BY" == "folder" ]]        || die "--by must be 'document' or 'folder'."
 [[ "$SORT" == "name" || "$SORT" == "hits" ]]          || die "--sort must be 'name' or 'hits'."
 [[ "$CONTEXT" =~ ^[0-9]+$ ]]                          || die "--context must be a whole number."
 
-# Normalise folder filter: strip the prefix if the user typed it
 if [[ -n "$FOLDERS" ]]; then
     NORM=""
     IFS=',' read -ra _f <<< "$FOLDERS"
@@ -361,11 +351,22 @@ collect_files
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
-if [[ -n "$OUTFILE" ]]; then exec > "$OUTFILE"; fi
-
+# Generate full report to temporary buffer or direct output
 case "$MODE" in
     search) run_search ;;
     count)  run_count ;;
-esac
+esac > "$TMP"
 
-if [[ -n "$OUTFILE" ]]; then echo "Wrote $OUTFILE" >&2; fi
+# If --save is requested, export the clean document hit matrix records (Folder US Doc US Hits US First_Match)
+if [[ -n "$SAVEFILE" ]]; then
+    doc_records | filter_zero > "$SAVEFILE"
+    echo "Saved search hit records to $SAVEFILE" >&2
+fi
+
+# Output handling
+if [[ -n "$OUTFILE" ]]; then
+    cat "$TMP" > "$OUTFILE"
+    echo "Wrote $OUTFILE" >&2
+else
+    cat "$TMP"
+fi
