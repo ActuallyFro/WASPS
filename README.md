@@ -20,20 +20,27 @@ flowchart TD
         D -->|"All-in-One Pass-Through<br/>./WASPS.sh -a -i file.html"| F
     end
 
-    subgraph Processing ["3. Post-Processing & Filtering"]
-        F -->|"Convert to Text<br/>./WASPS.sh -t"| G["wasps_downloads/*.txt<br/>(Plain Text Files)"]
+    subgraph Processing ["3. Post-Processing & Text Conversion"]
+        F -->|"Convert to Text<br/>./WASPS.sh -t"| G["PDFs_*/<br/>(*.txt Twin Files)"]
         F -->|"Page Search<br/>./WASPS.sh -s -n 120"| H["Console Output<br/>(Filtered List >= 120 Pages)"]
+    end
+
+    subgraph SearchAndAnalysis ["4. Advanced Search & Overlap Analysis"]
+        G -->|"Search & Save TSV<br/>./02_WASPS_Search.sh -s 'term' --save term1.tsv"| I["Saved Term TSV Files<br/>(term1.tsv, term2.tsv, ...)"]
+        I -->|"Strict Intersection Overlap<br/>./03_WASPS_Overlap.sh -i term1.tsv,term2.tsv"| J["Final Overlap Matrix Report<br/>(Markdown / CSV Output)"]
     end
 
     classDef setupStyle fill:#e6f4ea,stroke:#137333,stroke-width:2px,color:#0d652d;
     classDef parseStyle fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#174ea6;
     classDef downloadStyle fill:#fef7e0,stroke:#f9ab00,stroke-width:2px,color:#b06000;
     classDef processStyle fill:#f3e8fd,stroke:#a142f4,stroke-width:2px,color:#681da8;
+    classDef overlapStyle fill:#fce8e6,stroke:#c5221f,stroke-width:2px,color:#a50e0e;
 
     class A,B,C,D setupStyle;
     class E parseStyle;
     class F downloadStyle;
     class G,H processStyle;
+    class I,J overlapStyle;
 ```
 
 ---
