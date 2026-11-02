@@ -19,6 +19,7 @@ FIXED=0                 # 1 = literal text instead of regex
 CASE_SENSITIVE=0        # 1 = case-sensitive
 OCCURRENCES=0           # 1 = count every occurrence (default counts matching lines)
 SHOW_ZERO=0             # 1 = include documents with 0 hits in document-level tables
+WHOLE_WORD=1            # 1 = default whole-word/phrase matching (avoids substring matches like harmful)
 FOLDERS=""              # comma list of folder names (prefix optional); empty = all
 OUTFILE=""              # empty = stdout
 SAVEFILE=""             # empty = do not save search records for script 03 overlap analysis
@@ -58,6 +59,7 @@ show_help() {
     echo ""
     echo "Matching Options (Optional):"
     echo "  -F, --fixed            PATTERN is literal text (Default: regex, grep -E style)"
+    echo "  -S, --substring        Allow raw substring matching (default is whole-word/phrase)"
     echo "      --case             Case-sensitive (Default: case-insensitive)"
     echo "  -C, --context N        Show N lines either side of each hit (search mode)"
     echo "      --occurrences      Count every occurrence, not just matching lines"
@@ -92,15 +94,24 @@ folder_wanted() {   # folder_wanted NAME_WITHOUT_PREFIX
 
 check_pattern() {
     [[ -n "$PATTERN" ]] || die "empty search pattern."
+    local test_pat="$PATTERN"
+    if [[ $WHOLE_WORD -eq 1 && $FIXED -eq 0 ]]; then
+        test_pat="\b$PATTERN\b"
+    fi
     if [[ $FIXED -eq 0 ]]; then
-        echo "" | grep -E -e "$PATTERN" > /dev/null 2>&1
+        echo "" | grep -E -e "$test_pat" > /dev/null 2>&1
         if [[ $? -eq 2 ]]; then die "invalid regex '$PATTERN' (use -F for literal text)."; fi
     fi
 }
 
 build_grep() {
     GREP=(grep -a)
-    if [[ $FIXED -eq 1 ]]; then GREP+=(-F); else GREP+=(-E); fi
+    if [[ $FIXED -eq 1 ]]; then 
+        GREP+=(-F)
+        if [[ $WHOLE_WORD -eq 1 ]]; then GREP+=(-w); fi
+    else 
+        GREP+=(-E)
+    fi
     if [[ $CASE_SENSITIVE -eq 0 ]]; then GREP+=(-i); fi
 }
 
@@ -175,7 +186,8 @@ print_intro() {
     [[ "$FORMAT" == "md" ]] || return 0
     local kind="regex"; [[ $FIXED -eq 1 ]] && kind="literal"
     local cs="case-insensitive"; [[ $CASE_SENSITIVE -eq 1 ]] && cs="case-sensitive"
-    echo "**Pattern:** \`$PATTERN\` ($kind, $cs) | **Folders:** ${FOLDERS:-all ${PDF_PREFIX}*}"
+    local wt="whole-word/phrase"; [[ $WHOLE_WORD -eq 0 ]] && wt="substring"
+    echo "**Pattern:** \`$PATTERN\` ($kind, $wt, $cs) | **Folders:** ${FOLDERS:-all ${PDF_PREFIX}*}"
     echo ""
 }
 
@@ -188,6 +200,7 @@ while [[ "$#" -gt 0 ]]; do
         -s|--search) MODE="search"; PATTERN="${2:?missing pattern for $1}"; shift 2 ;;
         -c|--count)  MODE="count";  PATTERN="${2:?missing pattern for $1}"; shift 2 ;;
         -F|--fixed) FIXED=1; shift ;;
+        -S|--substring) WHOLE_WORD=0; shift ;;
         --case) CASE_SENSITIVE=1; shift ;;
         -C|--context) CONTEXT="${2:?missing value for $1}"; shift 2 ;;
         --occurrences) OCCURRENCES=1; shift ;;
@@ -229,16 +242,19 @@ check_pattern
 build_grep
 collect_files
 
+# Apply whole word boundary wrapping if enabled and in regex mode
+if [[ $WHOLE_WORD -eq 1 && $FIXED -eq 0 ]]; then
+    PATTERN="\b${PATTERN}\b"
+fi
+
 if [[ -n "$OUTFILE" ]]; then exec > "$OUTFILE"; fi
 
 print_intro
 
-# Initialize save file if requested
 if [[ -n "$SAVEFILE" ]]; then
     : > "$SAVEFILE"
 fi
 
-total_statements_count=0
 matched_docs_count=0
 
 # ==============================================================================
@@ -247,7 +263,6 @@ matched_docs_count=0
 
 if [[ "$MODE" == "search" ]]; then
     if [[ "$VIEW" == "statement" ]]; then
-        # Stream statements directly to render_table without intermediate temp files
         {
             for f in "${FILES[@]}"; do
                 d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
@@ -289,7 +304,7 @@ if [[ "$MODE" == "search" ]]; then
                         END { flush() }'
                 fi
             done
-        } | render_type="statement" render_table "Folder,Document,Statement" ""
+        } | render_table "Folder,Document,Statement" ""
         
         if [[ -n "$SAVEFILE" && -f "$SAVEFILE" ]]; then
             total_statements=$(awk -F "$US" '{s+=$3} END {print s+0}' "$SAVEFILE")
@@ -299,7 +314,6 @@ if [[ "$MODE" == "search" ]]; then
             print_footer "Search complete."
         fi
     else
-        # Document view: stream records directly
         {
             for f in "${FILES[@]}"; do
                 d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
@@ -323,7 +337,6 @@ if [[ "$MODE" == "search" ]]; then
                 fi
             done
         } | {
-            # Sort stream safely without large temp disk footprint using sort key 3 numeric
             local ord="" hord="nr"
             if [[ $REVERSE -eq 1 ]]; then ord="r"; hord="n"; fi
             if [[ "$SORT" == "hits" ]]; then
@@ -340,7 +353,6 @@ if [[ "$MODE" == "search" ]]; then
         fi
     fi
 elif [[ "$MODE" == "count" ]]; then
-    # Count mode streaming
     {
         for f in "${FILES[@]}"; do
             d="${f%/*}"; d="${d##*/}"; folder="${d#"$PDF_PREFIX"}"
